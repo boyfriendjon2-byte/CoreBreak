@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>THE FRACTURE | V0.4 - Visceral</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Courier New', Courier, monospace; color: #fff; user-select: none; }
+        canvas { display: block; }
+        
+        /* Interfaz de Juego */
+        #ui { position: absolute; bottom: 20px; left: 20px; color: #0f0; text-shadow: 2px 2px #000; pointer-events: none; display: none; z-index: 10; }
+        #crosshair { position: absolute; top: 50%; left: 50%; width: 4px; height: 4px; background: #0ff; transform: translate(-50%, -50%); pointer-events: none; display: none; border-radius: 50%; box-shadow: 0 0 5px #0ff; }
+        
+        /* Barra de Vida y Munición */
+        .hud-bar-container { width: 300px; height: 20px; background: rgba(0,0,0,0.5); border: 2px solid #555; margin-top: 10px; position: relative; }
+        #health-bar { width: 100%; height: 100%; background: #0f0; transition: width 0.2s; }
+        #ammo-counter { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); font-weight: bold; color: #0ff; font-size: 1.2em; text-shadow: 0 0 5px #0ff; }
+
+        /* Pantalla de Selección (Dreamcore vibe) */
+        #start-screen {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: radial-gradient(circle, #fcf5c7 0%, #d4b581 100%);
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            color: #333; z-index: 20;
+        }
+        .btn-container { display: flex; gap: 20px; margin-top: 30px; }
+        .btn { padding: 20px 30px; border: 2px solid #333; background: transparent; font-family: inherit; font-size: 18px; font-weight: bold; cursor: pointer; transition: 0.3s; }
+        .btn:hover { background: #333; color: #fcf5c7; }
+        
+        /* Pantalla de Muerte */
+        #death-screen { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(150,0,0,0.8); color: white; justify-content: center; align-items: center; flex-direction: column; z-index: 30; }
+        
+        #overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: repeating-linear-gradient(0deg, rgba(0,0,0,0.08) 0px, rgba(0,0,0,0.08) 1px, transparent 2px); pointer-events: none; z-index: 5; }
+        
+        /* Flash de daño/disparo */
+        #flash { position: fixed; top:0; left:0; width: 100%; height: 100%; background: white; opacity: 0; pointer-events: none; transition: opacity 0.05s; z-index: 4; }
+    </style>
+</head>
+<body>
+
+    <div id="start-screen">
+        <h1 style="font-size: 3em; text-shadow: 2px 2px 0px #fff;">[ LA FRACTURA ]</h1>
+        <p>Elige tu recipiente:</p>
+        <div class="btn-container">
+            <button class="btn" id="btn-kairos">⚡ KAIROS (Tryhard / Dash Daño)</button>
+            <button class="btn" id="btn-noxar">👁️ NOXAR (Control / Pulso Área)</button>
+        </div>
+    </div>
+
+    <div id="death-screen">
+        <h1 style="font-size: 4em;">BUCLE CORRUPTO</h1>
+        <button class="btn" onclick="location.reload()" style="color:white; border-color:white;">REINTEGRARSE</button>
+    </div>
+
+    <div id="ui">
+        <h1 id="player-name" style="margin:0;">SUJETO</h1>
+        <p style="margin: 0 0 10px 0;">HABILIDAD (Shift): <span id="skill-name">...</span></p>
+        <div class="hud-bar-container"><div id="health-bar"></div></div>
+        <div class="hud-bar-container" style="width: 150px; border-color: #0ff;">
+            <div style="width: 100%; height: 100%; background: rgba(0,255,255,0.2);"></div>
+            <div id="ammo-counter">10 / 10</div>
+        </div>
+    </div>
+    
+    <div id="crosshair"></div>
+    <div id="flash"></div>
+    <div id="overlay"></div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+
+        // --- SISTEMA DE JUEGO ---
+        let selectedCharacter = null;
+        let arenaLocked = false;
+        let isDead = false;
+        let playerHP = 100;
+        const MAX_AMMO = 10;
+        let currentAmmo = MAX_AMMO;
+        let isReloading = false;
+        const enemies = [];
+        const particles = []; // Para la sangre y efectos
+        
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0xfcf5c7, 0.04); 
+        scene.background = new THREE.Color(0xfcf5c7);
+
+        const camera = new THREE.PerspectiveCamera(80, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        scene.add(camera);
+
+        // --- ARMA: REVÓLVER DE IMPULSO V2 (Mejorado Visualmente) ---
+        const gunGroup = new THREE.Group();
+        const gunMaterial = new THREE.MeshStandardMaterial({ color: 0x222222, metalness: 0.9, roughness: 0.1 });
+        const energyColorKairos = 0x00ffff;
+        const energyColorNoxar = 0xff00ff;
+        
+        const bodyGeo = new THREE.BoxGeometry(0.12, 0.18, 0.3);
+        const body = new THREE.Mesh(bodyGeo, gunMaterial);
+        
+        const barrelGeo = new THREE.CylinderGeometry(0.04, 0.04, 0.4, 8);
+        barrelGeo.rotateX(Math.PI / 2);
+        const barrel = new THREE.Mesh(barrelGeo, gunMaterial);
+        barrel.position.set(0, 0.04, -0.25);
+        
+        // Núcleo de Energía Expuesto
+        const coreGeo = new THREE.CylinderGeometry(0.06, 0.06, 0.15, 16);
+        const coreMat = new THREE.MeshBasicMaterial({ color: energyColorKairos, transparent: true, opacity: 0.8 });
+        const core = new THREE.Mesh(coreGeo, coreMat);
+        core.position.set(0, 0.04, -0.05);
+        core.name = "energy_core"; // Para referenciarlo luego
+
+        // Agarre Ergonómico
+        const gripGeo = new THREE.BoxGeometry(0.08, 0.25, 0.1);
+        const grip = new THREE.Mesh(gripGeo, gunMaterial);
+        grip.position.set(0, -0.15, 0.1);
+        grip.rotation.x = -0.3;
+
+        gunGroup.add(body, barrel, core, grip);
+        gunGroup.position.set(0.35, -0.35, -0.6); // Posición inicial FPS
+        gunGroup.rotation.y = -0.1;
+        camera.add(gunGroup);
+
+        // --- ILUMINACIÓN ---
+        scene.add(new THREE.AmbientLight(0xffffff, 0.3));
+        const playerLight = new THREE.PointLight(0xffffff, 1, 20);
+        scene.add(playerLight);
+
+        // --- GENERADOR DE TEXTURAS PROCEDURALES (Mejora Visual) ---
+        function createProceduralTexture(size, type) {
+            const canvas = document.createElement('canvas');
+            canvas.width = canvas.height = size;
+            const ctx = canvas.getContext('2d');
+            
+            if (type === 'safe_wall') {
+                // Papel tapiz sutil de rombos (Dreamcore)
+                ctx.fillStyle = '#eadb9d'; ctx.fillRect(0, 0, size, size);
+                ctx.strokeStyle = 'rgba(0,0,0,0.05)'; ctx.lineWidth = 1;
+                for(let i=0; i<size; i+=32) {
+                    for(let j=0; j<size; j+=32) {
+                        ctx.beginPath(); ctx.moveTo(i, j); ctx.lineTo(i+16, j+16); ctx.stroke();
+                        ctx.beginPath(); ctx.moveTo(i+16, j); ctx.lineTo(i, j+16); ctx.stroke();
+                    }
+                }
+            } else if (type === 'safe_floor') {
+                // Alfombra gastada texturizada
+                ctx.fillStyle = '#ccb07c'; ctx.fillRect(0, 0, size, size);
+                for(let i=0; i<500; i++) {
+                    ctx.fillStyle = `rgba(0,0,0,${Math.random()*0.1})`; ctx.fillRect(Math.random()*size, Math.random()*size, 4, 4);
+                }
+            } else if (type === 'arena_floor') {
+                // Rejilla metálica oscura y corrupta
+                ctx.fillStyle = '#1a001a'; ctx.fillRect(0, 0, size, size);
+                ctx.strokeStyle = '#ff00ff'; ctx.lineWidth = 2;
+                for(let i=0; i<size; i+=64) {
+                    ctx.strokeRect(i, 0, 2, size); ctx.strokeRect(0, i, size, 2);
+                }
+            }
+            const tex = new THREE.CanvasTexture(canvas);
+            tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+            return tex;
+        }
+
+        const safeWallTex = createProceduralTexture(512, 'safe_wall');
+        const safeFloorTex = createProceduralTexture(512, 'safe_floor');
+        const arenaFloorTex = createProceduralTexture(512, 'arena_floor');
+
+        // --- MATERIALES SÓLIDOS MEJORADOS ---
+        const wallMatSafe = new THREE.MeshStandardMaterial({ map: safeWallTex, roughness: 0.9 }); 
+        const floorMatSafe = new THREE.MeshStandardMaterial({ map: safeFloorTex, roughness: 1.0 });
+        const ceilingMat = new THREE.MeshStandardMaterial({ color: 0xeeebd6, roughness: 1.0 });
+
+        const wallMatArena = new THREE.MeshStandardMaterial({ color: 0x111111, metalness: 0.8, roughness: 0.2 });
+        const floorMatArena = new THREE.MeshStandardMaterial({ map: arenaFloorTex, metalness: 0.6, roughness: 0.5 });
+        // Material para que la rejilla se repita bien
+        floorMatArena.map.repeat.set(4, 4); 
+
+        // --- CONSTRUCCIÓN DEL MUNDO (Mismo layout, mejores materiales) ---
+        function createRoom(w, h, d, x, y, z, floorMat, wallMat) {
+            const group = new THREE.Group();
+            const floor = new THREE.Mesh(new THREE.PlaneGeometry(w, d), floorMat); floor.rotation.x = -Math.PI / 2; group.add(floor);
+            const ceiling = new THREE.Mesh(new THREE.PlaneGeometry(w, d), ceilingMat); ceiling.rotation.x = Math.PI / 2; ceiling.position.y = h; group.add(ceiling);
+            const wallL = new THREE.Mesh(new THREE.PlaneGeometry(d, h), wallMat); wallL.rotation.y = Math.PI / 2; wallL.position.set(-w/2, h/2, 0); group.add(wallL);
+            const wallR = new THREE.Mesh(new THREE.PlaneGeometry(d, h), wallMat); wallR.rotation.y = -Math.PI / 2; wallR.position.set(w/2, h/2, 0); group.add(wallR);
+            const wallF = new THREE.Mesh(new THREE.PlaneGeometry(w, h), wallMat); wallF.position.set(0, h/2, -d/2); group.add(wallF); // Pared frontal (para cerrar arenas)
+            group.position.set(x, y, z); scene.add(group);
+            return group;
+        }
+
+        const safeRoom = createRoom(18, 5, 18, 0, 0, 0, floorMatSafe, wallMatSafe);
+        const backWall = new THREE.Mesh(new THREE.PlaneGeometry(18, 5), wallMatSafe); backWall.position.set(0, 2.5, 9); scene.add(backWall);
+
+        const corridor = createRoom(6, 4, 30, 0, 0, -24, floorMatSafe, wallMatSafe);
+
+        const door = new THREE.Mesh(new THREE.BoxGeometry(6, 4, 1), new THREE.MeshStandardMaterial({ color: 0x330000, metalness: 0.5 }));
+        door.position.set(0, 2, -39.5); scene.add(door);
+
+        const arena = createRoom(60, 15, 60, 0, -0.5, -70, floorMatArena, wallMatArena);
+
+        // --- CONTROLES Y SELECCIÓN ---
+        const controls = new PointerLockControls(camera, document.body);
+        camera.position.set(0, 2, 5);
+
+        document.getElementById('btn-kairos').onclick = () => startGame('KAIROS');
+        document.getElementById('btn-noxar').onclick = () => startGame('NOXAR');
+
+        function startGame(char) {
+            selectedCharacter = char;
+            document.getElementById('start-screen').style.display = 'none';
+            document.getElementById('ui').style.display = 'block';
+            document.getElementById('crosshair').style.display = 'block';
+            document.getElementById('player-name').innerText = `SUJETO: ${char}`;
+            document.getElementById('skill-name').innerText = char === 'KAIROS' ? "DASH OFENSIVO" : "PULSO DE VACÍO";
+            
+            // Ajustar color de energía del arma
+            coreMat.color.setHex(char === 'KAIROS' ? energyColorKairos : energyColorNoxar);
+            controls.lock();
+        }
+
+        // --- SISTEMA DE PARTÍCULAS (SANGRE GLITCH) ---
+        function spawnBlood(position, count, isGlitch = false) {
+            const color = isGlitch ? 0xff00ff : 0xaa0000; // Magenta para Noxar, Rojo oscuro para Kairos
+            for(let i=0; i<count; i++) {
+                const geo = new THREE.BoxGeometry(0.1, 0.1, 0.1);
+                const mat = new THREE.MeshBasicMaterial({ color: color, transparent: true });
+                const p = new THREE.Mesh(geo, mat);
+                p.position.copy(position);
+                
+                // Velocidad aleatoria explosion
+                p.userData.velocity = new THREE.Vector3(
+                    (Math.random() - 0.5) * 0.3,
+                    (Math.random()) * 0.3,
+                    (Math.random() - 0.5) * 0.3
+                );
+                p.userData.gravity = 0.01;
+                p.userData.life = 1.0; // Segundos de vida
+                
+                scene.add(p);
+                particles.push(p);
+            }
+        }
+
+        // --- SISTEMA DE COMBATE Y MUNICIÓN ---
+        const raycaster = new THREE.Raycaster();
+        let canShoot = true;
+
+        document.addEventListener('mousedown', (e) => {
+            if(!controls.isLocked || isDead || !canShoot || isReloading) return;
+            if (currentAmmo > 0) {
+                shoot();
+            } else {
+                // Sonido visual de "clic" vacío
+                coreMat.opacity = 0.2;
+                setTimeout(()=>coreMat.opacity=0.8, 100);
+            }
+        });
+
+        // Forzar recarga con 'R'
+        document.addEventListener('keydown', (e) => {
+            if(e.code === 'KeyR' && currentAmmo < MAX_AMMO && !isReloading) reload();
+        });
+
+        function updateAmmoUI() {
+            document.getElementById('ammo-counter').innerText = `${currentAmmo} / ${MAX_AMMO}`;
+        }
+
+        function shoot() {
+            canShoot = false;
+            currentAmmo--;
+            updateAmmoUI();
+            
+            // Animación de Retroceso (Recoil)
+            gunGroup.position.z += 0.08;
+            gunGroup.rotation.x += 0.05;
+            setTimeout(() => { gunGroup.position.z -= 0.08; gunGroup.rotation.x -= 0.05; }, 40);
+
+            // Destello de cañón
+            const f = document.getElementById('flash');
+            f.style.background = selectedCharacter === 'KAIROS' ? 'cyan' : 'magenta';
+            f.style.opacity = '0.2';
+            setTimeout(() => f.style.opacity = '0', 40);
+
+            // Efecto lumínico del núcleo
+            coreMat.color.setHex(0xffffff);
+            setTimeout(() => coreMat.color.setHex(selectedCharacter === 'KAIROS' ? energyColorKairos : energyColorNoxar), 80);
+
+            // Hitscan
+            raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+            const intersects = raycaster.intersectObjects(enemies.map(e => e.mesh));
+
+            if (intersects.length > 0) {
+                const hitPoint = intersects[0].point;
+                const enemyObj = enemies.find(e => e.mesh === intersects[0].object);
+                if (enemyObj) {
+                    takeDamage(enemyObj, 35, hitPoint); 
+                }
+            }
+
+            // Cadencia y Auto-Recarga
+            let fireRate = selectedCharacter === 'KAIROS' ? 120 : 250; 
+            setTimeout(() => {
+                canShoot = true;
+                if (currentAmmo <= 0) reload(); // Auto-recarga
+            }, fireRate);
+        }
+
+        function reload() {
+            if(isReloading) return;
+            isReloading = true;
+            document.getElementById('ammo-counter').innerText = "REC..";
+            document.getElementById('ammo-counter').style.color = "#ff0000";
+
+            // Animación de Recarga (Girar el arma y bajarla)
+            const tl = gunGroup.rotation;
+            const tp = gunGroup.position;
+            
+            // Bajar y girar
+            tp.y -= 0.2;
+            tl.z += 0.5;
+            tl.y -= 0.3;
+            coreMat.opacity = 0.1; // Apagar núcleo
+
+            setTimeout(() => {
+                // Volver a posición original
+                tp.y += 0.2;
+                tl.z -= 0.5;
+                tl.y += 0.3;
+                coreMat.opacity = 0.8;
+                
+                currentAmmo = MAX_AMMO;
+                updateAmmoUI();
+                document.getElementById('ammo-counter').style.color = "#0ff";
+                isReloading = false;
+            }, 1200); // Tiempo de recarga
+        }
+
+        // --- DAÑO A ENEMIGOS + SANGRE ---
+        function takeDamage(enemy, amount, hitPoint) {
+            enemy.hp -= amount;
+            
+            // Feedback Visual (Sangre)
+            spawnBlood(hitPoint, 8, selectedCharacter === 'NOXAR');
+            
+            // Parpadeo de impacto
+            enemy.mesh.material.color.setHex(0xffffff);
+            enemy.mesh.scale.set(1.1, 1.1, 1.1);
+            setTimeout(() => {
+                if(enemy.mesh) {
+                    enemy.mesh.material.color.setHex(0xff0000);
+                    enemy.mesh.scale.set(1, 1, 1);
+                }
+            }, 80);
+
+            if (enemy.hp <= 0) {
+                // Explosión final de sangre
+                spawnBlood(enemy.mesh.position, 20, selectedCharacter === 'NOXAR');
+                scene.remove(enemy.mesh);
+                enemies.splice(enemies.indexOf(enemy), 1);
+            }
+        }
+
+        // --- DAÑO AL JUGADOR (Sin cambios) ---
+        function damagePlayer(amount) {
+            if(isDead) return;
+            playerHP -= amount;
+            document.getElementById('health-bar').style.width = Math.max(0, playerHP) + '%';
+            if(playerHP < 30) document.getElementById('health-bar').style.background = '#ff0000';
+            
+            const f = document.getElementById('flash'); f.style.background = 'red'; f.style.opacity = '0.4'; setTimeout(() => f.style.opacity = '0', 100);
+
+            if (playerHP <= 0) {
+                isDead = true; controls.unlock();
+                document.getElementById('death-screen').style.display = 'flex';
+                document.getElementById('ui').style.display = 'none'; document.getElementById('crosshair').style.display = 'none';
+            }
+        }
+
+        // --- MOVIMIENTO Y FÍSICAS BÁSICAS (Dash Daño) ---
+        let moveF = false, moveB = false, moveL = false, moveR = false;
+        let velocity = new THREE.Vector3();
+        let direction = new THREE.Vector3();
+        let isDashing = false;
+
+        document.addEventListener('keydown', (e) => {
+            if(!selectedCharacter) return;
+            switch(e.code) {
+                case 'KeyW': moveF = true; break; case 'KeyS': moveB = true; break; case 'KeyA': moveL = true; break; case 'KeyD': moveR = true; break;
+                case 'ShiftLeft': useSkill(); break; 
+            }
+        });
+        document.addEventListener('keyup', (e) => {
+            switch(e.code) {
+                case 'KeyW': moveF = false; break; case 'KeyS': moveB = false; break; case 'KeyA': moveL = false; break; case 'KeyD': moveR = false; break;
+            }
+        });
+
+        function useSkill() {
+            if(isReloading) return;
+            if (selectedCharacter === 'KAIROS') {
+                velocity.z -= 130; // Dash potente
+                isDashing = true;
+                coreMat.color.setHex(0xffffff);
+                setTimeout(() => { isDashing = false; coreMat.color.setHex(energyColorKairos); }, 300);
+            } else if (selectedCharacter === 'NOXAR') {
+                // Pulso de área visual y daño
+                const f = document.getElementById('flash'); f.style.background = 'magenta'; f.style.opacity = '0.5'; setTimeout(() => f.style.opacity = '0', 150);
+                enemies.forEach(en => {
+                    const dist = camera.position.distanceTo(en.mesh.position);
+                    if (dist < 15) {
+                        en.mesh.position.y += 2; // Levantar
+                        takeDamage(en, 40, en.mesh.position.clone()); // Sangre en su centro
+                    }
+                });
+            }
+        }
+
+        function applyCollisions() {
+            const pos = camera.position;
+            // Límites simples para el layout actual
+            if (pos.z > -9) { if (pos.x > 8.5) pos.x = 8.5; if (pos.x < -8.5) pos.x = -8.5; if (pos.z > 8.5) pos.z = 8.5; }
+            else if (pos.z <= -9 && pos.z > -39) { if (pos.x > 2.5) pos.x = 2.5; if (pos.x < -2.5) pos.x = -2.5; }
+            else if (pos.z <= -40) {
+                if (pos.x > 29) pos.x = 29; if (pos.x < -29) pos.x = -29; if (pos.z < -99) pos.z = -99;
+                if (pos.z > -41) pos.z = -41; // Bloqueo de retorno
+            }
+        }
+
+        function checkEvents() {
+            if (camera.position.z < -20 && camera.position.z > -39 && !arenaLocked) { if(door.position.y < 6) door.position.y += 0.2; }
+            if (camera.position.z < -42 && !arenaLocked) {
+                arenaLocked = true; door.position.y = 2;
+                scene.fog.color.setHex(0x0a0000); scene.fog.density = 0.06; scene.background = new THREE.Color(0x050005);
+                spawnEnemies();
+            }
+        }
+
+        function spawnEnemies() {
+            for(let i=0; i<12; i++) {
+                const geo = new THREE.BoxGeometry(1.5, 3, 1.5);
+                const mat = new THREE.MeshStandardMaterial({ color: 0xff0000, metalness: 0.8, roughness: 0.1 });
+                const mesh = new THREE.Mesh(geo, mat);
+                mesh.position.set((Math.random() - 0.5) * 45, 1.5, -55 - (Math.random() * 35));
+                scene.add(mesh);
+                enemies.push({ mesh: mesh, hp: 100, speed: Math.random() * 3 + 2.5, lastAttack: 0 });
+            }
+        }
+
+        // --- BUCLE PRINCIPAL (Mejorado) ---
+        let prevTime = performance.now();
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (controls.isLocked && !isDead) {
+                const time = performance.now();
+                const delta = (time - prevTime) / 1000;
+
+                velocity.x -= velocity.x * 10.0 * delta; velocity.z -= velocity.z * 10.0 * delta;
+                direction.z = Number(moveF) - Number(moveB); direction.x = Number(moveR) - Number(moveL); direction.normalize();
+
+                const speed = selectedCharacter === 'KAIROS' ? 550.0 : 450.0;
+                if (moveF || moveB) velocity.z -= direction.z * speed * delta;
+                if (moveL || moveR) velocity.x -= direction.x * speed * delta;
+
+                controls.moveRight(-velocity.x * delta); controls.moveForward(-velocity.z * delta);
+                
+                // Bobbing del arma y brillo del núcleo
+                const core = gunGroup.getObjectByName("energy_core");
+                if (core) core.material.opacity = 0.6 + Math.sin(time * 0.005) * 0.2;
+
+                if ((moveF || moveB || moveL || moveR) && !isReloading) {
+                    gunGroup.position.y = -0.35 + Math.sin(time * 0.01) * 0.02;
+                    gunGroup.position.x = 0.35 + Math.cos(time * 0.005) * 0.01;
+                } else if(!isReloading) {
+                    gunGroup.position.y = -0.35; gunGroup.position.x = 0.35;
+                }
+
+                applyCollisions(); checkEvents(); playerLight.position.copy(camera.position);
+
+                // Kairos: Daño por contacto en Dash
+                if (isDashing) {
+                    enemies.forEach(en => { if (camera.position.distanceTo(en.mesh.position) < 4) takeDamage(en, 2, en.mesh.position); });
+                }
+
+                // --- IA Y ATAQUE ENEMIGO ---
+                if(arenaLocked) {
+                    enemies.forEach(en => {
+                        en.mesh.lookAt(camera.position);
+                        const dist = camera.position.distanceTo(en.mesh.position);
+                        if (dist > 3.0) { en.mesh.translateZ(en.speed * delta); } 
+                        else {
+                            if (time - en.lastAttack > 800) { // Ataque rápido
+                                damagePlayer(12); en.lastAttack = time;
+                                en.mesh.position.y += 0.5; setTimeout(()=> en.mesh.position.y -= 0.5, 50);
+                            }
+                        }
+                    });
+                }
+
+                // --- ACTUALIZAR PARTÍCULAS ---
+                for(let i = particles.length - 1; i >= 0; i--) {
+                    const p = particles[i];
+                    p.userData.life -= delta;
+                    
+                    if (p.userData.life <= 0) {
+                        scene.remove(p);
+                        particles.splice(i, 1);
+                    } else {
+                        // Movimiento física simple
+                        p.position.add(p.userData.velocity);
+                        p.userData.velocity.y -= p.userData.gravity; // Gravedad
+                        p.material.opacity = p.userData.life; // Fade out
+                        // Efecto glitch (escala aleatoria sutil)
+                        if(selectedCharacter === 'NOXAR' && Math.random() > 0.8) p.scale.setScalar(Math.random()*1.5);
+                    }
+                }
+
+                prevTime = time;
+            }
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => { camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); });
+    </script>
+</body>
+</html>
