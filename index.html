@@ -240,10 +240,13 @@ let dashing=false,blocking=false,parryWin=false,parryTmr=null;
 let jvel=0,grounded=true,jumpsLeft=2; // Kairos double jump
 let combo=0,comboT=null,noDmg=true;
 let lvl=-1,arenaOn=false,lvlDone=false,lastEntered=-1;
-const enemies=[],parts=[],projs=[];
+const enemies=[],parts=[],projs=[],voidZones=[];
 let boss=null;
 let elevY=-28,elevOn=false;
 let noxCharge=0,noxCharging=false; // Noxar charged shot
+let sliding=false,slideVel=new THREE.Vector3(),slideTimer=0; // Kairos slide
+let invFrames=0; // invincibility frames after parry
+let lastDmgTime=0; // for passive regen
 const PRADIUS=0.6,PHEIGHT=2.0;
 const boxes=[];
 
@@ -429,7 +432,14 @@ function mkRoom(w,h,d,ox,oz,fm,wm){
     var mw=new THREE.Mesh(new THREE.PlaneGeometry(w,h),wm);mw.rotation.y=p[3];mw.position.set(p[0],p[1],p[2]);scene.add(mw);
   });
 }
-function addObs(cx,cz,hw,hd){boxes.push({x0:cx-hw,x1:cx+hw,z0:cz-hd,z1:cz+hd})}
+function addObs(cx,cz,hw,hd){
+  // Full-height solid (pillars, props) - always blocks XZ
+  boxes.push({x0:cx-hw,x1:cx+hw,z0:cz-hd,z1:cz+hd,y0:-1,y1:99,solid:true});
+}
+function addPlat(cx,cy,cz,hw,ht,hd){
+  // Platform: y0=bottom, y1=top surface. Player lands on top; can pass under if below y0
+  boxes.push({x0:cx-hw,x1:cx+hw,z0:cz-hd,z1:cz+hd,y0:cy-ht,y1:cy+ht,solid:false,cy:cy,ht:ht});
+}
 
 // -- ELEVATOR --
 var shM=M(0x04041a,0x050525,.25,.8,.15);
@@ -523,12 +533,40 @@ LVL.forEach(function(ld,li){
     var cp2=new THREE.Mesh(new THREE.BoxGeometry(4,.08,4),MB(arenaColors[li]));cp2.position.set(cp[0],ld.h-.04,cp[1]);scene.add(cp2);
   });
 
-  // Cover platforms
-  [[10,1.5,-6,7,.5,3.5],[-10,1.5,-6,7,.5,3.5],[0,3.5,-12,6,.5,3.5],
-   [14,2.5,-18,5,.5,3],[-14,2.5,-18,5,.5,3],[0,1.5,10,8,.5,3],[9,2,9,4,.5,3],[-9,2,9,4,.5,3]].forEach(function(cv){
-    var cp3=new THREE.Mesh(new THREE.BoxGeometry(cv[3],cv[4],cv[5]),MAT.COV);cp3.position.set(cv[0],cv[1],ld.z+cv[2]);scene.add(cp3);
-    var rl=new THREE.Mesh(new THREE.BoxGeometry(cv[3],.07,.07),MB(arenaColors[li]));rl.position.set(cv[0],cv[1]+cv[4]/2+.06,ld.z+cv[2]-cv[5]/2+.04);scene.add(rl);
-    addObs(cv[0],ld.z+cv[2],cv[3]/2+.4,cv[5]/2+.4);
+  // Cover platforms - varied heights for interesting gameplay
+  // Format: [cx, cy, cz_offset, width, thickness, depth]
+  // Thickness is half-height, so actual top = cy + thickness/2
+  // Platforms intentionally vary in height: low (duck under), mid, high (need double jump)
+  var platDefs=[
+    [10,  1.5, -6,   7,  .3, 3.5],  // low, can walk under if you crouch (jump)
+    [-10, 1.5, -6,   7,  .3, 3.5],  // same
+    [0,   3.5, -12,  6,  .3, 3.5],  // mid height
+    [14,  2.5, -18,  5,  .3, 3.0],
+    [-14, 2.5, -18,  5,  .3, 3.0],
+    [0,   1.8, 10,   8,  .3, 3.0],  // low back platform
+    [9,   2.5, 9,    4,  .3, 3.0],
+    [-9,  2.5, 9,    4,  .3, 3.0],
+    [0,   4.5, -20,  4,  .3, 3.0],  // high center platform (need double jump)
+    [6,   3.0, 3,    3,  .3, 3.0],
+    [-6,  3.0, 3,    3,  .3, 3.0],
+  ];
+  platDefs.forEach(function(cv){
+    var cxP=cv[0],cyP=cv[1],czP=ld.z+cv[2],wP=cv[3],thP=cv[4],dP=cv[5];
+    var cp3=new THREE.Mesh(new THREE.BoxGeometry(wP,thP,dP),MAT.COV);cp3.position.set(cxP,cyP,czP);scene.add(cp3);
+    // Glowing edge strip on top
+    var rl=new THREE.Mesh(new THREE.BoxGeometry(wP,.06,.06),MB(arenaColors[li]));
+    rl.position.set(cxP,cyP+thP/2+.04,czP-dP/2+.04);scene.add(rl);
+    // Side legs (visual only)
+    var legH=cyP-thP/2;
+    if(legH>0.1){
+      var legM=new THREE.MeshBasicMaterial({color:0x0a0020});
+      [[-wP/2+.25,czP-dP/2+.25],[wP/2-.25,czP-dP/2+.25],[-wP/2+.25,czP+dP/2-.25],[wP/2-.25,czP+dP/2-.25]].forEach(function(lp){
+        var leg=new THREE.Mesh(new THREE.BoxGeometry(.18,legH,.18),legM);leg.position.set(cxP+lp[0],legH/2,lp[1]);scene.add(leg);
+      });
+    }
+    // Platform collision: top = cy + th/2, bottom = cy - th/2
+    // Pass hw=half-width, ht=half-thickness, hd=half-depth
+    addPlat(cxP,cyP+thP/2,czP,wP/2+.25,thP/2+.1,dP/2+.25);
   });
 
   // Corner pillars with emissive strips
@@ -737,7 +775,10 @@ function killEn(en){
   if(!en.alive)return;en.alive=false;
   spawnPts(en.m.position.clone(),20,char==='NOXAR'?0xff00ff:0x00aaff);
   scene.remove(en.m);enemies.splice(enemies.indexOf(en),1);
-  kills+=en.rwd;document.getElementById('kn').innerText=kills;addCombo();chkClear();
+  var comboBonus=Math.max(1,Math.floor(combo/3));
+  kills+=en.rwd*comboBonus;document.getElementById('kn').innerText=kills;
+  if(comboBonus>1)notif('+'+en.rwd*comboBonus+' x'+comboBonus+' COMBO BONUS',900);
+  addCombo();chkClear();
 }
 function killBoss(){
   spawnPts(boss.m.position.clone(),80,0xff0033);scene.remove(boss.m);boss=null;
@@ -791,9 +832,10 @@ function openGate(li){
   var iv=setInterval(function(){gd.m.position.y+=.22;if(gd.m.position.y>10)clearInterval(iv)},16);
 }
 function dmgPly(amt){
-  if(dead||paused)return;
+  if(dead||paused||invFrames>0)return;
   if(blocking&&char==='KAIROS')amt=Math.round(amt*.22);
   noDmg=false;hp-=amt;uHP();
+  lastDmgTime=performance.now();
   document.getElementById('dv').style.opacity='1';setTimeout(function(){document.getElementById('dv').style.opacity='0'},300);
   screenShake(6,220);
   fx('rgba(255,0,0,.28)',85);combo=0;uCombo();
@@ -815,11 +857,26 @@ function useSkill(){
     coreMat.color.setHex(0xffffff);mzL.intensity=7;
     document.getElementById('db2').style.opacity='1';setTimeout(function(){document.getElementById('db2').style.opacity='0'},320);
     fx('rgba(0,190,255,.22)',65);
+    // Dash trail
+    var trailDir=new THREE.Vector3();ctrl.getDirection(trailDir);
+    for(var ti=0;ti<5;ti++){
+      (function(t){setTimeout(function(){
+        if(!dashing)return;
+        var tp=cam.position.clone().sub(trailDir.clone().multiplyScalar(t*.6));
+        spawnPts(tp,3,0x00ffff);
+      },t*40)})(ti);
+    }
     setTimeout(function(){dashing=false;coreMat.color.setHex(0x00ffff);mzL.intensity=0},280);
   } else {
     fx('rgba(190,0,255,.4)',185);
     enemies.forEach(function(en){if(en.alive&&cam.position.distanceTo(en.m.position)<19){en.m.position.y+=3.2;hitEn(en,62,en.m.position.clone(),false)}});
     if(boss&&cam.position.distanceTo(boss.m.position)<19)hitEn(boss,48,boss.m.position.clone(),false);
+    // Spawn void zone on ground under player (lingers 4s, damages enemies)
+    var vzPos=cam.position.clone();vzPos.y=0.1;
+    var vzMesh=new THREE.Mesh(new THREE.CylinderGeometry(4,4,.12,16),new THREE.MeshBasicMaterial({color:0x8800ff,transparent:true,opacity:.4}));
+    vzMesh.position.copy(vzPos);scene.add(vzMesh);
+    voidZones.push({m:vzMesh,life:4,pos:vzPos,radius:4,tick:0});
+    spawnPts(vzPos,8,0xff00ff);
   }
 }
 function startBlock(){if(char!=='KAIROS')return;blocking=true;parryWin=true;clearTimeout(parryTmr);parryTmr=setTimeout(function(){parryWin=false},310)}
@@ -827,6 +884,8 @@ function endBlock(){blocking=false}
 function doParry(){
   sParry();document.getElementById('pi').style.opacity='1';setTimeout(function(){document.getElementById('pi').style.opacity='0'},850);
   parryWin=false;addCombo();addCombo();addCombo();
+  invFrames=0.6; // 0.6 seconds invincibility
+  document.getElementById('dv').style.opacity='0';
 }
 function noxBlink(){
   var dir=new THREE.Vector3();cam.getWorldDirection(dir);cam.position.addScaledVector(dir,8.5);
@@ -848,15 +907,47 @@ function applyCol(){
     }
     if(!inLvl){p.x=Math.max(-4.5,Math.min(4.5,p.x))}
   }
-  var px=p.x,pz2=p.z,r=PRADIUS;
+  var px=p.x,py=p.y,pz2=p.z,r=PRADIUS;
   for(var bi=0;bi<boxes.length;bi++){
     var b=boxes[bi];
-    if(px>b.x0-r&&px<b.x1+r&&pz2>b.z0-r&&pz2<b.z1+r){
+    // XZ overlap check
+    var xOvlp=px>b.x0-r&&px<b.x1+r&&pz2>b.z0-r&&pz2<b.z1+r;
+    if(!xOvlp)continue;
+    if(b.solid){
+      // Full pillar/prop: always push XZ out
       var dL=px-(b.x0-r),dR=(b.x1+r)-px,dF=pz2-(b.z0-r),dB=(b.z1+r)-pz2;
       var mn=Math.min(dL,dR,dF,dB);
-      if(mn===dL)p.x=b.x0-r;else if(mn===dR)p.x=b.x1+r;else if(mn===dF)p.z=b.z0-r;else p.z=b.z1+r;
+      if(mn===dL)p.x=b.x0-r;else if(mn===dR)p.x=b.x1+r;
+      else if(mn===dF)p.z=b.z0-r;else p.z=b.z1+r;
+    } else {
+      // Platform: only collide if player is within Y range of the platform
+      var platTop=b.y1;      // top surface Y
+      var platBot=b.y0;      // bottom of platform geometry
+      var pFoot=py;          // player foot position
+      var pHead=py+1.8;      // player head
+      // Can pass under: if foot is below (platBot - clearance), no collision
+      var clearance=0.35;
+      if(pFoot<platBot-clearance){
+        // Player fully below platform - no XZ push, just allow passage
+        continue;
+      }
+      // Player is at or above platform base - land on top or push sideways
+      if(pFoot<=platTop+0.12&&pFoot>=platBot-clearance&&jvel<=0){
+        // Land on top surface
+        p.y=platTop;jvel=0;grounded=true;jumpsLeft=2;
+      } else if(pFoot>platTop){
+        // Player fully above - no collision
+        continue;
+      } else {
+        // Player inside/hitting side - push XZ
+        var dL2=px-(b.x0-r),dR2=(b.x1+r)-px,dF2=pz2-(b.z0-r),dB2=(b.z1+r)-pz2;
+        var mn2=Math.min(dL2,dR2,dF2,dB2);
+        if(mn2===dL2)p.x=b.x0-r;else if(mn2===dR2)p.x=b.x1+r;
+        else if(mn2===dF2)p.z=b.z0-r;else p.z=b.z1+r;
+      }
     }
   }
+  // World floor
   if(p.y<PHEIGHT){p.y=PHEIGHT;jvel=0;grounded=true;jumpsLeft=2}
 }
 
@@ -929,6 +1020,12 @@ document.addEventListener('keydown',function(e){
   else if(e.code===K.jp&&jumpsLeft>0&&char==='KAIROS'){jvel=14;jumpsLeft--;grounded=false;fx('rgba(0,200,255,.08)',30)}
   else if(e.code===K.bl){if(char==='KAIROS')startBlock();else noxBlink()}
   else if(e.code===K.rl&&char==='KAIROS'&&ammo<MXA&&!reloading)reload();
+  else if(e.code==='ControlLeft'&&char==='KAIROS'&&grounded&&!sliding){
+    // Slide: boost in current movement direction, low profile
+    var sDir=new THREE.Vector3();ctrl.getDirection(sDir);sDir.y=0;sDir.normalize();
+    slideVel.copy(sDir).multiplyScalar(22);sliding=true;slideTimer=0.45;
+    fx('rgba(0,200,255,.15)',80);
+  }
 });
 document.addEventListener('keyup',function(e){
   var K=window.K;
@@ -1025,6 +1122,9 @@ function animate(){
   if(!ctrl.isLocked||paused){ren.render(scene,cam);return}
 
   if(skCD>0){skCD=Math.max(0,skCD-dt*1000);uSk()}
+  if(invFrames>0){invFrames-=dt;if(invFrames<0)invFrames=0}
+  // Passive HP regen: +1hp/s after 5s no damage, up to 30hp
+  if(hp>0&&hp<30&&performance.now()-lastDmgTime>5000){hp=Math.min(30,hp+dt*1.2);uHP()}
 
   // Movement
   var spd=char==='KAIROS'?580:420;
@@ -1156,6 +1256,18 @@ function animate(){
     if(Math.random()<.15)ubossBar();
   }
 
+  // Void zones (Noxar)
+  for(var vi=voidZones.length-1;vi>=0;vi--){
+    var vz=voidZones[vi];vz.life-=dt;vz.tick+=dt;
+    vz.m.material.opacity=Math.max(0,vz.life/4*.45);
+    vz.m.rotation.y+=dt*1.2;
+    if(vz.life<=0){scene.remove(vz.m);voidZones.splice(vi,1);continue}
+    // Damage enemies every 0.5s
+    if(vz.tick>0.5){vz.tick=0;
+      enemies.forEach(function(en){if(en.alive&&en.m.position.distanceTo(vz.pos)<vz.radius){hitEn(en,18,en.m.position.clone(),false)}});
+      if(boss&&boss.m.position.distanceTo(vz.pos)<vz.radius)hitEn(boss,12,boss.m.position.clone(),false);
+    }
+  }
   // Projectiles
   for(var prj=projs.length-1;prj>=0;prj--){
     var p2=projs[prj];p2.life-=dt;
